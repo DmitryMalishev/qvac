@@ -1,6 +1,7 @@
 #include "ImageCodec.hpp"
 
 #include <algorithm>
+#include <array>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -8,6 +9,15 @@
 // clang-analyzer reports false-positive leaks inside STB implementation paths
 // that are not owned by this wrapper. Normal builds still compile the
 // implementation here; analyzer runs only need the declarations.
+#define STBI_NO_HDR
+#define STBI_NO_TGA
+#define STBI_NO_PSD
+#define STBI_NO_PIC
+#define STBI_NO_PNM
+#define STBI_NO_GIF
+#define STBI_NO_BMP
+#define STBI_MAX_DIMENSIONS 16384
+
 #if defined(__clang_analyzer__)
 #include <stb_image.h>
 #include <stb_image_write.h>
@@ -103,8 +113,18 @@ std::vector<uint8_t> encodeToJpeg(const sd_image_t& image, int quality) {
   return out;
 }
 
-sd_image_t decodeImage(const std::vector<uint8_t>& imageBytes) {
-  if (imageBytes.empty() ||
+sd_image_t
+decodeImage(const std::vector<uint8_t>& imageBytes, uint64_t pixelLimit) {
+  constexpr size_t maxCompressedBytes = 50ULL * 1024 * 1024;
+  constexpr std::array<uint8_t, 8> pngSignature = {
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
+  const bool isPng =
+      imageBytes.size() >= pngSignature.size() &&
+      std::equal(pngSignature.begin(), pngSignature.end(), imageBytes.begin());
+  const bool isJpeg = imageBytes.size() >= 3 && imageBytes[0] == 0xFF &&
+                      imageBytes[1] == 0xD8 && imageBytes[2] == 0xFF;
+  if ((!isPng && !isJpeg) || imageBytes.size() > maxCompressedBytes ||
+      pixelLimit == 0 ||
       imageBytes.size() >
           static_cast<size_t>(std::numeric_limits<int>::max())) {
     return sd_image_t{};
@@ -114,17 +134,35 @@ sd_image_t decodeImage(const std::vector<uint8_t>& imageBytes) {
   int decodedHeight = 0;
   int sourceChannels = 0;
   constexpr int desiredChannels = 3;
+  const int inputSize = static_cast<int>(imageBytes.size());
+  if (stbi_info_from_memory(
+          imageBytes.data(),
+          inputSize,
+          &decodedWidth,
+          &decodedHeight,
+          &sourceChannels) == 0 ||
+      decodedWidth <= 0 || decodedHeight <= 0 ||
+      decodedWidth > STBI_MAX_DIMENSIONS ||
+      decodedHeight > STBI_MAX_DIMENSIONS ||
+      static_cast<uint64_t>(decodedWidth) *
+              static_cast<uint64_t>(decodedHeight) >
+          std::min(pixelLimit, MAX_DECODED_PIXELS)) {
+    return sd_image_t{};
+  }
 
+  int loadedWidth = 0;
+  int loadedHeight = 0;
   // clang-analyzer can miss that decodedData owns and releases STB memory.
   // NOLINTNEXTLINE(clang-analyzer-unix.Malloc)
   std::unique_ptr<uint8_t, FreeDeleter> decodedData(stbi_load_from_memory(
       imageBytes.data(),
-      static_cast<int>(imageBytes.size()),
-      &decodedWidth,
-      &decodedHeight,
+      inputSize,
+      &loadedWidth,
+      &loadedHeight,
       &sourceChannels,
       desiredChannels));
-  if (decodedData == nullptr || decodedWidth <= 0 || decodedHeight <= 0) {
+  if (decodedData == nullptr || loadedWidth != decodedWidth ||
+      loadedHeight != decodedHeight) {
     return sd_image_t{};
   }
 

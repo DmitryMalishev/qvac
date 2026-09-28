@@ -8,12 +8,15 @@
  *   - CVE-2022-28042: Heap-based use-after-free in stbi__jpeg_huff_decode
  */
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <memory>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <stb_image_write.h>
 
 #include "utils/ImageCodec.hpp"
 
@@ -272,4 +275,93 @@ TEST_F(StbImageSecurityTest, RoundTripEncodeDecode) {
 
   // Cleanup
   free(decoded.data);
+}
+
+TEST_F(StbImageSecurityTest, AcceptsJpeg) {
+  std::vector<uint8_t> pixels(2 * 2 * 3, 128);
+  sd_image_t image{2, 2, 3, pixels.data()};
+  auto jpeg = image_codec::encodeToJpeg(image, 90);
+  ASSERT_FALSE(jpeg.empty());
+
+  auto decoded = image_codec::decodeImage(jpeg);
+  std::unique_ptr<uint8_t, image_codec::FreeDeleter> owned(decoded.data);
+  ASSERT_NE(decoded.data, nullptr);
+  EXPECT_EQ(decoded.width, 2u);
+  EXPECT_EQ(decoded.height, 2u);
+}
+
+TEST_F(StbImageSecurityTest, RejectsUnsupportedFormats) {
+  const std::vector<std::vector<uint8_t>> unsupported = {
+      {'G', 'I', 'F', '8', '9', 'a'},
+      {'B', 'M', 0, 0},
+      {'P', '6', '\n', '1', ' ', '1', '\n'},
+      {'#', '?', 'R', 'A', 'D', 'I', 'A', 'N', 'C', 'E'},
+      {'8', 'B', 'P', 'S'},
+      {0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 24, 0},
+      {'P', 'I', 'C', 'T'}};
+  for (const auto& bytes : unsupported) {
+    auto decoded = image_codec::decodeImage(bytes);
+    EXPECT_EQ(decoded.data, nullptr);
+  }
+}
+
+TEST_F(StbImageSecurityTest, RejectsValidBmp) {
+  std::vector<uint8_t> bmp;
+  const uint8_t pixel[3] = {255, 0, 0};
+  const auto appendBytes = [](void* context, void* data, int size) {
+    auto& bytes = *static_cast<std::vector<uint8_t>*>(context);
+    const auto* first = static_cast<const uint8_t*>(data);
+    bytes.insert(bytes.end(), first, first + size);
+  };
+  ASSERT_NE(stbi_write_bmp_to_func(appendBytes, &bmp, 1, 1, 3, pixel), 0);
+  ASSERT_FALSE(bmp.empty());
+  EXPECT_EQ(image_codec::decodeImage(bmp).data, nullptr);
+}
+
+TEST_F(StbImageSecurityTest, RejectsCompressedInputAboveLimit) {
+  std::vector<uint8_t> bytes(50ULL * 1024 * 1024 + 1, 0);
+  const auto png = createValidPngHeader();
+  std::copy(png.begin(), png.end(), bytes.begin());
+  EXPECT_EQ(image_codec::decodeImage(bytes).data, nullptr);
+}
+
+TEST_F(StbImageSecurityTest, RejectsValidPngAbovePixelLimit) {
+  constexpr int side = 8193;
+  std::vector<uint8_t> png;
+  {
+    std::vector<uint8_t> pixels(static_cast<size_t>(side) * side * 3, 0);
+    sd_image_t image{
+        static_cast<uint32_t>(side),
+        static_cast<uint32_t>(side),
+        3,
+        pixels.data()};
+    png = image_codec::encodeToPng(image);
+  }
+  ASSERT_FALSE(png.empty());
+  EXPECT_EQ(image_codec::decodeImage(png).data, nullptr);
+}
+
+TEST_F(StbImageSecurityTest, EnforcesRemainingJobPixelBudget) {
+  std::vector<uint8_t> pixels(2 * 2 * 3, 128);
+  sd_image_t image{2, 2, 3, pixels.data()};
+  auto png = image_codec::encodeToPng(image);
+  ASSERT_FALSE(png.empty());
+
+  EXPECT_EQ(image_codec::decodeImage(png, 3).data, nullptr);
+  EXPECT_EQ(image_codec::decodeImage(png, 0).data, nullptr);
+  auto decoded = image_codec::decodeImage(png, 4);
+  std::unique_ptr<uint8_t, image_codec::FreeDeleter> owned(decoded.data);
+  EXPECT_NE(decoded.data, nullptr);
+}
+
+TEST_F(StbImageSecurityTest, EnforcesDimensionBoundary) {
+  for (const int width : {16384, 16385}) {
+    std::vector<uint8_t> pixels(static_cast<size_t>(width) * 3, 0);
+    sd_image_t image{static_cast<uint32_t>(width), 1, 3, pixels.data()};
+    auto png = image_codec::encodeToPng(image);
+    ASSERT_FALSE(png.empty());
+    auto decoded = image_codec::decodeImage(png);
+    std::unique_ptr<uint8_t, image_codec::FreeDeleter> owned(decoded.data);
+    EXPECT_EQ(decoded.data != nullptr, width == 16384);
+  }
 }
