@@ -1,23 +1,17 @@
-/**
- * Security tests for stb_image CVE mitigations
- *
- * Tests defensive coding around stb_image to prevent exploitation of:
- *   - CVE-2021-28021: Buffer overflow in stbi__extend_receive
- *   - CVE-2021-37789: Heap-based buffer overflow in stbi__jpeg_load
- *   - CVE-2022-28041: Integer overflow via stbi__jpeg_decode_block_prog_dc
- *   - CVE-2022-28042: Heap-based use-after-free in stbi__jpeg_huff_decode
- */
+// Image decoding limits and format tests.
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <string_view>
 #include <vector>
 
 #include <gtest/gtest.h>
 #include <stb_image_write.h>
 
+#include "utils/EsrganUpscaler.hpp"
 #include "utils/ImageCodec.hpp"
 
 // Helper to create a minimal valid PNG header
@@ -37,6 +31,29 @@ std::vector<uint8_t> createValidPngHeader() {
 }
 
 class StbImageSecurityTest : public ::testing::Test {};
+
+std::vector<uint8_t> decodeBase64(std::string_view encoded) {
+  std::vector<uint8_t> bytes;
+  uint32_t value = 0;
+  int bits = -8;
+  for (char c : encoded) {
+    if (c == '=') {
+      break;
+    }
+    int digit = c >= 'A' && c <= 'Z'   ? c - 'A'
+                : c >= 'a' && c <= 'z' ? c - 'a' + 26
+                : c >= '0' && c <= '9' ? c - '0' + 52
+                : c == '+'             ? 62
+                                       : 63;
+    value = (value << 6) | digit;
+    bits += 6;
+    if (bits >= 0) {
+      bytes.push_back(static_cast<uint8_t>((value >> bits) & 0xFF));
+      bits -= 8;
+    }
+  }
+  return bytes;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // decodeImage security tests
@@ -290,6 +307,44 @@ TEST_F(StbImageSecurityTest, AcceptsJpeg) {
   EXPECT_EQ(decoded.height, 2u);
 }
 
+TEST_F(StbImageSecurityTest, AcceptsProgressiveJpegWithinScanLimit) {
+  const auto jpeg = decodeBase64(
+      "/9j/4AAQSkZJRgABAQAAAQABAAD/"
+      "2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAx"
+      "NDQ0Hyc5PTgyPC4zNDL/"
+      "2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy"
+      "MjIyMjIyMjIyMjIyMjL/wgARCAACAAIDASIAAhEBAxEB/"
+      "8QAFQABAQAAAAAAAAAAAAAAAAAAAAb/xAAUAQEAAAAAAAAAAAAAAAAAAAAC/"
+      "9oADAMBAAIQAxAAAAGIDH//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/"
+      "9oACAEBAAEFAn//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAEDAQE/AX//"
+      "xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/AX//"
+      "xAAUEAEAAAAAAAAAAAAAAAAAAAAA/"
+      "9oACAEBAAY/An//xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/IX//"
+      "2gAMAwEAAgADAAAAEAf/xAAUEQEAAAAAAAAAAAAAAAAAAAAA/"
+      "9oACAEDAQE/EH//xAAUEQEAAAAAAAAAAAAAAAAAAAAA/9oACAECAQE/EH//"
+      "xAAUEAEAAAAAAAAAAAAAAAAAAAAA/9oACAEBAAE/EH//2Q==");
+  image_codec::DecodeFailure failure;
+  auto decoded =
+      image_codec::decodeImage(jpeg, image_codec::MAX_DECODED_PIXELS, &failure);
+  std::unique_ptr<uint8_t, image_codec::FreeDeleter> owned(decoded.data);
+  ASSERT_NE(decoded.data, nullptr)
+      << image_codec::decodeFailureMessage(failure);
+  EXPECT_EQ(failure, image_codec::DecodeFailure::None);
+  EXPECT_EQ(decoded.width, 2u);
+  EXPECT_EQ(decoded.height, 2u);
+}
+
+TEST_F(StbImageSecurityTest, AcceptsSmall16BitPng) {
+  const auto png = decodeBase64(
+      "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACEAAAAAAHTY67AAAAEklEQVR4nGNkYWBgYGJgYGAA"
+      "AABCAAg70OdSAAAAAElFTkSuQmCC");
+  auto decoded = image_codec::decodeImage(png);
+  std::unique_ptr<uint8_t, image_codec::FreeDeleter> owned(decoded.data);
+  ASSERT_NE(decoded.data, nullptr);
+  EXPECT_EQ(decoded.width, 2u);
+  EXPECT_EQ(decoded.height, 2u);
+}
+
 TEST_F(StbImageSecurityTest, RejectsUnsupportedFormats) {
   const std::vector<std::vector<uint8_t>> unsupported = {
       {'G', 'I', 'F', '8', '9', 'a'},
@@ -364,4 +419,87 @@ TEST_F(StbImageSecurityTest, EnforcesDimensionBoundary) {
     std::unique_ptr<uint8_t, image_codec::FreeDeleter> owned(decoded.data);
     EXPECT_EQ(decoded.data != nullptr, width == 16384);
   }
+}
+
+TEST_F(StbImageSecurityTest, RejectsPngInflateBeyondHeader) {
+  std::vector<uint8_t> pixels(1024 * 1024 * 3, 0);
+  sd_image_t image{1024, 1024, 3, pixels.data()};
+  auto png = image_codec::encodeToPng(image);
+  ASSERT_FALSE(png.empty());
+  png[18] = 0;
+  png[19] = 1;
+  png[22] = 0;
+  png[23] = 1;
+
+  image_codec::DecodeFailure failure;
+  auto decoded =
+      image_codec::decodeImage(png, image_codec::MAX_DECODED_PIXELS, &failure);
+  EXPECT_EQ(decoded.data, nullptr);
+  EXPECT_EQ(failure, image_codec::DecodeFailure::PngInflateLimit);
+}
+
+TEST_F(StbImageSecurityTest, RejectsHighMemoryPngSource) {
+  std::vector<uint8_t> pixels(4, 0);
+  sd_image_t image{1, 1, 4, pixels.data()};
+  auto png = image_codec::encodeToPng(image);
+  ASSERT_FALSE(png.empty());
+  png[16] = 0;
+  png[17] = 0;
+  png[18] = 0x20;
+  png[19] = 0;
+  png[20] = 0;
+  png[21] = 0;
+  png[22] = 0x20;
+  png[23] = 0;
+  png[24] = 16;
+  image_codec::DecodeFailure failure;
+  auto decoded =
+      image_codec::decodeImage(png, image_codec::MAX_DECODED_PIXELS, &failure);
+  EXPECT_EQ(decoded.data, nullptr);
+  EXPECT_EQ(failure, image_codec::DecodeFailure::HighMemoryInputLimit);
+}
+
+TEST_F(StbImageSecurityTest, RejectsHighMemoryFourComponentJpeg) {
+  const std::vector<uint8_t> jpeg = {0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x14, 0x08,
+                                     0x20, 0x00, 0x20, 0x00, 0x04, 0x01, 0x11,
+                                     0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00,
+                                     0x04, 0x11, 0x00, 0xFF, 0xD9};
+  image_codec::DecodeFailure failure;
+  auto decoded =
+      image_codec::decodeImage(jpeg, image_codec::MAX_DECODED_PIXELS, &failure);
+  EXPECT_EQ(decoded.data, nullptr);
+  EXPECT_EQ(failure, image_codec::DecodeFailure::HighMemoryInputLimit);
+}
+
+TEST_F(StbImageSecurityTest, RejectsExcessiveJpegScans) {
+  std::vector<uint8_t> pixels(3, 128);
+  sd_image_t image{1, 1, 3, pixels.data()};
+  auto jpeg = image_codec::encodeToJpeg(image, 90);
+  ASSERT_FALSE(jpeg.empty());
+  const std::vector<uint8_t> marker = {0xFF, 0xDA};
+  const auto firstScan =
+      std::search(jpeg.begin(), jpeg.end(), marker.begin(), marker.end());
+  ASSERT_NE(firstScan, jpeg.end());
+  const std::vector<uint8_t> emptyScans(33 * 4, 0);
+  auto offset = static_cast<size_t>(firstScan - jpeg.begin());
+  jpeg.insert(jpeg.begin() + offset, emptyScans.begin(), emptyScans.end());
+  for (size_t i = offset; i < offset + emptyScans.size(); i += 4) {
+    jpeg[i] = 0xFF;
+    jpeg[i + 1] = 0xDA;
+    jpeg[i + 2] = 0;
+    jpeg[i + 3] = 2;
+  }
+  image_codec::DecodeFailure failure;
+  auto decoded =
+      image_codec::decodeImage(jpeg, image_codec::MAX_DECODED_PIXELS, &failure);
+  EXPECT_EQ(decoded.data, nullptr);
+  EXPECT_EQ(failure, image_codec::DecodeFailure::JpegScanLimit);
+}
+
+TEST_F(StbImageSecurityTest, BoundsProjectedEsrganOutput) {
+  using qvac_lib_inference_addon_sd::esrganOutputFitsLimits;
+  EXPECT_TRUE(esrganOutputFitsLimits(512, 512, 4, 2));
+  EXPECT_TRUE(esrganOutputFitsLimits(2048, 2048, 4, 1));
+  EXPECT_FALSE(esrganOutputFitsLimits(2048, 2048, 4, 2));
+  EXPECT_FALSE(esrganOutputFitsLimits(16384, 1, 2, 1));
 }

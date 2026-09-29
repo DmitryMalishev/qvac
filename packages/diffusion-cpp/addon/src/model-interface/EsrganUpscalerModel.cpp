@@ -64,12 +64,15 @@ std::any EsrganUpscalerModel::process(const std::any& input) {
 
   const auto upscaleStart = std::chrono::steady_clock::now();
 
-  sd_image_t decoded = image_codec::decodeImage(job.imageBytes);
+  image_codec::DecodeFailure decodeFailure;
+  sd_image_t decoded = image_codec::decodeImage(
+      job.imageBytes, image_codec::MAX_DECODED_PIXELS, &decodeFailure);
   std::unique_ptr<uint8_t, image_codec::FreeDeleter> decodedData(decoded.data);
   if (decoded.data == nullptr) {
     throw StatusError(
         general_error::InvalidArgument,
-        "Failed to decode input image; expected PNG or JPEG bytes");
+        "Failed to decode input image: " +
+            std::string(image_codec::decodeFailureMessage(decodeFailure)));
   }
 
   throwIfCancelled(cancelRequested_);

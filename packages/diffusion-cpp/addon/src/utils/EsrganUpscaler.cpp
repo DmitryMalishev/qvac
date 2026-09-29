@@ -9,12 +9,32 @@
 #include <inference-addon-cpp/Logger.hpp>
 
 #include "BackendSelection.hpp"
+#include "ImageCodec.hpp"
 #include "LoggingMacros.hpp"
 #include "SdErrors.hpp"
 
 using namespace qvac_errors;
 
 namespace qvac_lib_inference_addon_sd {
+
+bool esrganOutputFitsLimits(
+    uint32_t width, uint32_t height, uint32_t factor, int repeats) noexcept {
+  if (width == 0 || height == 0 || factor == 0 || repeats <= 0) {
+    return false;
+  }
+  uint64_t projectedWidth = width;
+  uint64_t projectedHeight = height;
+  for (int repeat = 0; repeat < repeats; ++repeat) {
+    if (projectedWidth > 16384 / factor || projectedHeight > 16384 / factor ||
+        projectedWidth * factor >
+            image_codec::MAX_DECODED_PIXELS / (projectedHeight * factor)) {
+      return false;
+    }
+    projectedWidth *= factor;
+    projectedHeight *= factor;
+  }
+  return true;
+}
 
 namespace {
 
@@ -191,6 +211,12 @@ sd_image_t EsrganUpscaler::upscaleImage(
         "ESRGAN upscaler reported an invalid scale factor");
   }
   const auto factor = static_cast<uint32_t>(scale);
+  if (!esrganOutputFitsLimits(
+          inputImage.width, inputImage.height, factor, repeats)) {
+    throw StatusError(
+        general_error::InvalidArgument,
+        "ESRGAN output exceeds 64 Mi pixel or 16,384 pixel edge limit");
+  }
 
   sd_image_t current = inputImage;
   bool currentOwned = false;
@@ -226,6 +252,18 @@ sd_image_t EsrganUpscaler::upscaleImage(
     // boundaries differ on Windows prebuilds and mixing them corrupts the
     // heap).
     sd_image_t next = outImages[0];
+    if (next.width == 0 || next.height == 0 || next.channel == 0 ||
+        next.channel > 4 || next.width > 16384 || next.height > 16384 ||
+        static_cast<uint64_t>(next.width) * next.height >
+            image_codec::MAX_DECODED_PIXELS) {
+      free_sd_images(outImages, outCount);
+      if (currentOwned) {
+        freeSdImageData(current);
+      }
+      throw StatusError(
+          general_error::InternalError,
+          "ESRGAN returned an over-limit output image");
+    }
     const size_t nextBytes = static_cast<size_t>(next.width) *
                              static_cast<size_t>(next.height) *
                              static_cast<size_t>(next.channel);

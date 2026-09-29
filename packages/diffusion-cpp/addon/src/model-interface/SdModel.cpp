@@ -904,14 +904,16 @@ SdModel::processImage(const GenerationJob& job, const picojson::value& parsed) {
                   "] is empty -- every reference must be a non-empty "
                   "PNG/JPEG buffer.");
 
+        image_codec::DecodeFailure decodeFailure;
         sd_image_t decoded = image_codec::decodeImage(
             job.initImagesBytes[i],
-            image_codec::MAX_JOB_DECODED_PIXELS - decodedPixels);
+            image_codec::MAX_JOB_DECODED_PIXELS - decodedPixels,
+            &decodeFailure);
         if (decoded.data == nullptr) {
           throw StatusError(
               general_error::InvalidArgument,
               "img2img: failed to decode init_images[" + std::to_string(i) +
-                  "] (corrupt or unsupported format; supported: PNG, JPEG)");
+                  "]: " + image_codec::decodeFailureMessage(decodeFailure));
         }
         std::unique_ptr<uint8_t, image_codec::FreeDeleter> owned(decoded.data);
         refImgs->push_back(decoded);
@@ -972,7 +974,16 @@ SdModel::processImage(const GenerationJob& job, const picojson::value& parsed) {
         }
       }
       if (!initPng.empty()) {
-        initImg = image_codec::decodeImage(initPng);
+        image_codec::DecodeFailure decodeFailure;
+        initImg = image_codec::decodeImage(
+            initPng, image_codec::MAX_DECODED_PIXELS, &decodeFailure);
+        if (initImg.data == nullptr) {
+          throw StatusError(
+              general_error::InvalidArgument,
+              "img2img: failed to decode init_image: " +
+                  std::string(
+                      image_codec::decodeFailureMessage(decodeFailure)));
+        }
         initData.reset(initImg.data);
       }
 
@@ -1473,12 +1484,16 @@ SdModel::processVideo(const GenerationJob& job, const picojson::value& parsed) {
   uint64_t decodedPixels = 0;
 
   if (!job.initImageBytes.empty()) {
-    initImg = image_codec::decodeImage(job.initImageBytes);
+    image_codec::DecodeFailure decodeFailure;
+    initImg = image_codec::decodeImage(
+        job.initImageBytes,
+        image_codec::MAX_JOB_DECODED_PIXELS,
+        &decodeFailure);
     if (!initImg.data)
       throw StatusError(
           general_error::InvalidArgument,
-          "processVideo: failed to decode init_image (corrupt or "
-          "unsupported format; supported: PNG, JPEG)");
+          "processVideo: failed to decode init_image: " +
+              std::string(image_codec::decodeFailureMessage(decodeFailure)));
     // Take ownership *before* the dimension check so a mismatch can't leak
     // the freshly-decoded pixel buffer (mirrors the control_frames path).
     initData.reset(initImg.data);
@@ -1498,15 +1513,17 @@ SdModel::processVideo(const GenerationJob& job, const picojson::value& parsed) {
     controlFrames.reserve(job.controlFramesBytes.size());
     controlData.reserve(job.controlFramesBytes.size());
     for (size_t i = 0; i < job.controlFramesBytes.size(); ++i) {
+      image_codec::DecodeFailure decodeFailure;
       sd_image_t decoded = image_codec::decodeImage(
           job.controlFramesBytes[i],
-          image_codec::MAX_JOB_DECODED_PIXELS - decodedPixels);
+          image_codec::MAX_JOB_DECODED_PIXELS - decodedPixels,
+          &decodeFailure);
       if (!decoded.data)
         throw StatusError(
             general_error::InvalidArgument,
             "processVideo: failed to decode control_frames[" +
                 std::to_string(i) +
-                "] (corrupt or unsupported format; supported: PNG, JPEG)");
+                "]: " + image_codec::decodeFailureMessage(decodeFailure));
       // Take ownership *before* the dimension check so a mismatch can't leak.
       PixelBuffer owned(decoded.data);
       if (static_cast<int>(decoded.width) != vid.width ||
@@ -1528,15 +1545,17 @@ SdModel::processVideo(const GenerationJob& job, const picojson::value& parsed) {
     referenceImages.reserve(job.referenceImagesBytes.size());
     referenceData.reserve(job.referenceImagesBytes.size());
     for (size_t i = 0; i < job.referenceImagesBytes.size(); ++i) {
+      image_codec::DecodeFailure decodeFailure;
       sd_image_t decoded = image_codec::decodeImage(
           job.referenceImagesBytes[i],
-          image_codec::MAX_JOB_DECODED_PIXELS - decodedPixels);
+          image_codec::MAX_JOB_DECODED_PIXELS - decodedPixels,
+          &decodeFailure);
       if (!decoded.data)
         throw StatusError(
             general_error::InvalidArgument,
             "processVideo: failed to decode reference_images[" +
                 std::to_string(i) +
-                "] (corrupt or unsupported format; supported: PNG, JPEG)");
+                "]: " + image_codec::decodeFailureMessage(decodeFailure));
       referenceData.emplace_back(decoded.data);
       referenceImages.push_back(decoded);
       decodedPixels += static_cast<uint64_t>(decoded.width) * decoded.height;

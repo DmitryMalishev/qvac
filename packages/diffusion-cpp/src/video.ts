@@ -548,6 +548,19 @@ export default class VideoStableDiffusion {
     } else if (hasReferenceConditioning) {
       throw new Error('reference_attention_strength and reference_downscale_factor require reference_images.')
     }
+    let decodedInputPixels = 0
+    const countInputPixels = (image: Uint8Array): void => {
+      const dimensions = peekImageDims(image)
+      if (dimensions) {
+        decodedInputPixels += dimensions.w * dimensions.h
+        if (decodedInputPixels > 128 * 1024 * 1024) {
+          throw new RangeError('Video input images exceed the 128 Mi pixel decoded job limit')
+        }
+      }
+    }
+    if (params.init_image instanceof Uint8Array) countInputPixels(params.init_image)
+    for (const frame of params.control_frames ?? []) countInputPixels(frame)
+    for (const image of params.reference_images ?? []) countInputPixels(image)
     if (
       params.reference_attention_strength != null &&
       (!Number.isFinite(params.reference_attention_strength) ||

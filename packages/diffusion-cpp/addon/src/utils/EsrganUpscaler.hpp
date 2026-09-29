@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -25,6 +26,9 @@ struct EsrganUpscalerConfig {
 };
 
 EsrganUpscalerConfig makeUpscalerConfig(const SdCtxConfig& config);
+
+bool esrganOutputFitsLimits(
+    uint32_t width, uint32_t height, uint32_t factor, int repeats) noexcept;
 
 void sdLogCallback(sd_log_level_t level, const char* text, void* userData);
 

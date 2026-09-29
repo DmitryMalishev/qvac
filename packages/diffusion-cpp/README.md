@@ -473,6 +473,11 @@ The default export from `@qvac/diffusion-cpp/video` and the named
 | `temporal_tiling`                                            | LTX-only temporal VAE tiling to reduce peak VRAM                   |
 | `cache_mode`, `cache_preset`, `cache_threshold`              | Step-cache controls                                                |
 
+Decoded `init_image`, `control_frames`, and `reference_images` together are
+limited to 128 Mi pixels per job; each image is limited to 64 Mi pixels. At
+1920×1080, up to 64 control frames fit when there are no other input images.
+An initial or reference image reduces the available control-frame budget.
+
 Video output is a single MJPG AVI `Uint8Array`. For LTX-2 models loaded with
 `audioVae`, the AVI also contains a second IEEE-float PCM stream at 48 kHz.
 VLC handles these files well.

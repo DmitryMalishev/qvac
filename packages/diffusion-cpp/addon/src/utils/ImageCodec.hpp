@@ -10,6 +10,22 @@ namespace image_codec {
 inline constexpr uint64_t MAX_DECODED_PIXELS = 64ULL * 1024 * 1024;
 inline constexpr uint64_t MAX_JOB_DECODED_PIXELS = 128ULL * 1024 * 1024;
 
+enum class DecodeFailure {
+  None,
+  UnsupportedFormat,
+  CompressedInputLimit,
+  InvalidHeader,
+  DimensionLimit,
+  PixelLimit,
+  JobPixelLimit,
+  HighMemoryInputLimit,
+  PngInflateLimit,
+  JpegScanLimit,
+  InvalidData,
+};
+
+const char* decodeFailureMessage(DecodeFailure failure) noexcept;
+
 struct FreeDeleter {
   void operator()(uint8_t* ptr) const noexcept;
 };
@@ -20,6 +36,6 @@ std::vector<uint8_t> encodeToPng(const sd_image_t& image);
 std::vector<uint8_t> encodeToJpeg(const sd_image_t& image, int quality);
 sd_image_t decodeImage(
     const std::vector<uint8_t>& imageBytes,
-    uint64_t pixelLimit = MAX_DECODED_PIXELS);
+    uint64_t pixelLimit = MAX_DECODED_PIXELS, DecodeFailure* failure = nullptr);
 
 } // namespace image_codec

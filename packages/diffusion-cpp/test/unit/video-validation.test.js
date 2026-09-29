@@ -769,6 +769,25 @@ test('run | rejects empty control_frames array', async (t) => {
   )
 })
 
+test('run | rejects input images above the decoded job budget before dispatch', async (t) => {
+  const m = makeWanModel()
+  const dispatches = recordNativeDispatch(m)
+  const largeHeader = Uint8Array.from(FAKE_PNG)
+  largeHeader[18] = 0x20
+  largeHeader[19] = 0
+  largeHeader[22] = 0x20
+  largeHeader[23] = 0
+  await t.exception.all(
+    m.run({
+      mode: 'txt2vid',
+      prompt: 'hi',
+      control_frames: [largeHeader, largeHeader, largeHeader]
+    }),
+    /128 Mi pixel decoded job limit/
+  )
+  t.is(dispatches(), 0)
+})
+
 test('run | rejects non-Uint8Array entry in control_frames (with index)', async (t) => {
   const m = makeWanModel()
   await t.exception.all(
